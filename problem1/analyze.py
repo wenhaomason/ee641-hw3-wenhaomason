@@ -2,18 +2,18 @@
 Analysis and visualization of attention patterns.
 """
 
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from pathlib import Path
-import json
 import argparse
-from tqdm import tqdm
+import json
+from pathlib import Path
 
-from model import Seq2SeqTransformer
-from dataset import create_dataloaders, get_vocab_size
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+import torch
 from attention import create_causal_mask
+from dataset import create_dataloaders, get_vocab_size
+from model import Seq2SeqTransformer
+from tqdm import tqdm
 
 
 def extract_attention_weights(model, dataloader, device, num_samples=100):
@@ -40,6 +40,7 @@ def extract_attention_weights(model, dataloader, device, num_samples=100):
     samples_collected = 0
 
     with torch.no_grad():
+        progress = tqdm(total=num_samples, desc="Extracting attentions")
         for batch in dataloader:
             if samples_collected >= num_samples:
                 break
@@ -66,9 +67,19 @@ def extract_attention_weights(model, dataloader, device, num_samples=100):
             # TODO: Register hooks on attention layers
             # You'll need to access model.encoder_layers[i].self_attn
             # and model.decoder_layers[i].self_attn, cross_attn
+            handles = []
+            for layer in model.encoder_layers:
+                handles.append(layer.self_attn.register_forward_hook(make_hook(encoder_attentions)))
+            for layer in model.decoder_layers:
+                handles.append(layer.self_attn.register_forward_hook(make_hook(decoder_self_attentions)))
+                handles.append(layer.cross_attn.register_forward_hook(make_hook(decoder_cross_attentions)))
 
             # Forward pass
             # TODO: Run model forward pass
+            # Use teacher forcing style inputs for decoder to align positions
+            decoder_input = targets[:, :-1]
+            tgt_mask = create_causal_mask(decoder_input.size(1), device=device)
+            _ = model(inputs, decoder_input, tgt_mask=tgt_mask)
 
             # Collect samples
             samples_to_take = min(batch_size, num_samples - samples_collected)
@@ -76,8 +87,25 @@ def extract_attention_weights(model, dataloader, device, num_samples=100):
             all_targets.extend(targets[:samples_to_take].cpu().numpy())
 
             # TODO: Collect attention weights from hooks
+            # Slice captured attentions to match collected samples
+            # Encoder self-attn
+            for t in encoder_attentions:
+                all_encoder_attentions.append(t[:samples_to_take])
+            # Decoder self-attn
+            for t in decoder_self_attentions:
+                all_decoder_self_attentions.append(t[:samples_to_take])
+            # Decoder cross-attn
+            for t in decoder_cross_attentions:
+                all_decoder_cross_attentions.append(t[:samples_to_take])
+
+            # Remove hooks
+            for h in handles:
+                h.remove()
 
             samples_collected += samples_to_take
+            progress.update(samples_to_take)
+
+        progress.close()
 
     return {
         'encoder_attention': all_encoder_attentions,
@@ -138,7 +166,7 @@ def visualize_attention_pattern(attention_weights, input_tokens, output_tokens,
 
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.show()
+    plt.close(fig)
 
 
 def analyze_head_specialization(attention_data, output_dir):
@@ -164,6 +192,70 @@ def analyze_head_specialization(attention_data, output_dir):
     head_stats = {}
 
     # TODO: Implement analysis
+    # We aggregate across collected encoder attention tensors
+    # Each tensor has shape [batch, num_heads, seq_len, seq_len]
+    if attention_data['encoder_attention']:
+        # Concatenate along batch dimension from all captures
+        enc_attn_list = attention_data['encoder_attention']
+        enc_all = torch.cat(enc_attn_list, dim=0)  # [N, H, L, L]
+        num_heads = enc_all.size(1)
+        seq_len = enc_all.size(2)
+
+        # Operator token id is 10 per dataset generation
+        operator_token_id = 10
+
+        # Build mask for operator positions per sample using inputs provided
+        # inputs are saved as numpy arrays with padding possibly 0; operator token appears once in input
+        if isinstance(attention_data['inputs'], list):
+            # List of 1D arrays -> stack to [N, L]
+            inputs_all = np.stack(attention_data['inputs'], axis=0)
+        else:
+            inputs_all = np.array(attention_data['inputs'])
+        # Ensure shape [N, L]
+        if inputs_all.ndim != 2:
+            inputs_all = inputs_all.reshape(-1, enc_all.size(-1))
+        N = enc_all.size(0)
+        # Clip if there is any mismatch
+        min_N = min(N, inputs_all.shape[0])
+        enc_all = enc_all[:min_N]
+        inputs_all = inputs_all[:min_N]
+
+        # Operator mask [N, 1, 1, L]
+        op_mask = (torch.from_numpy(inputs_all) == operator_token_id).unsqueeze(1).unsqueeze(1)
+        op_mask = op_mask.to(enc_all.dtype)
+
+        # Average attention to operator token (average over queries and samples)
+        # Compute mean over query positions and samples of attention assigned to positions where op_mask==1
+        op_attn = (enc_all * op_mask).sum(dim=-1) / (op_mask.sum(dim=-1).clamp(min=1.0))
+        avg_op_attn = op_attn.mean(dim=(0, 2)).tolist()  # per-head
+
+        # Diagonal attention
+        diag_indices = torch.arange(seq_len)
+        diag_attn = enc_all[:, :, diag_indices, diag_indices]  # [N, H, L]
+        avg_diag_attn = diag_attn.mean(dim=(0, 2)).tolist()
+
+        # Carry positions (approximate as attention to previous position i-1)
+        if seq_len > 1:
+            prev_indices = torch.clamp(diag_indices - 1, min=0)
+            carry_attn = enc_all[:, :, diag_indices, prev_indices]  # [N, H, L]
+            avg_carry_attn = carry_attn.mean(dim=(0, 2)).tolist()
+        else:
+            avg_carry_attn = [0.0 for _ in range(num_heads)]
+
+        # Entropy of attention distribution over keys per head/query
+        # entropy = -sum p log p; add small epsilon for stability
+        eps = 1e-9
+        p = enc_all.clamp(min=eps)
+        entropy = -(p * p.log()).sum(dim=-1)  # [N, H, L]
+        avg_entropy = entropy.mean(dim=(0, 2)).tolist()
+
+        for h in range(num_heads):
+            head_stats[f'head_{h}'] = {
+                'avg_attention_to_operator': float(avg_op_attn[h]),
+                'avg_attention_diagonal': float(avg_diag_attn[h]),
+                'avg_attention_carry_prev': float(avg_carry_attn[h]),
+                'avg_entropy': float(avg_entropy[h])
+            }
 
     # Save analysis results
     with open(output_dir / 'head_analysis.json', 'w') as f:
@@ -200,6 +292,61 @@ def ablation_study(model, dataloader, device, output_dir):
     # 2. Evaluate model performance
     # 3. Restore the head
     # 4. Record the performance drop
+    def eval_model():
+        return evaluate_model(model, dataloader, device)
+
+    # Helper to ablate one head by zeroing corresponding columns of linear_out
+    def ablate_head_linear_out(mha_module, head_idx):
+        d_k = mha_module.d_k
+        start = head_idx * d_k
+        end = (head_idx + 1) * d_k
+        W = mha_module.linear_out.weight
+        # Save original slice
+        original = W[:, start:end].detach().clone()
+        # Zero out
+        with torch.no_grad():
+            W[:, start:end] = 0
+        return original
+
+    def restore_head_linear_out(mha_module, head_idx, original_slice):
+        d_k = mha_module.d_k
+        start = head_idx * d_k
+        end = (head_idx + 1) * d_k
+        with torch.no_grad():
+            mha_module.linear_out.weight[:, start:end] = original_slice
+
+    # Encoder self-attention ablation
+    ablation_results['encoder'] = {}
+    for layer_idx, layer in enumerate(model.encoder_layers):
+        layer_results = []
+        for head_idx in range(layer.self_attn.num_heads):
+            orig = ablate_head_linear_out(layer.self_attn, head_idx)
+            acc = eval_model()
+            restore_head_linear_out(layer.self_attn, head_idx, orig)
+            layer_results.append(acc)
+        ablation_results['encoder'][str(layer_idx)] = layer_results
+
+    # Decoder self-attention ablation
+    ablation_results['decoder_self'] = {}
+    for layer_idx, layer in enumerate(model.decoder_layers):
+        layer_results = []
+        for head_idx in range(layer.self_attn.num_heads):
+            orig = ablate_head_linear_out(layer.self_attn, head_idx)
+            acc = eval_model()
+            restore_head_linear_out(layer.self_attn, head_idx, orig)
+            layer_results.append(acc)
+        ablation_results['decoder_self'][str(layer_idx)] = layer_results
+
+    # Decoder cross-attention ablation
+    ablation_results['decoder_cross'] = {}
+    for layer_idx, layer in enumerate(model.decoder_layers):
+        layer_results = []
+        for head_idx in range(layer.cross_attn.num_heads):
+            orig = ablate_head_linear_out(layer.cross_attn, head_idx)
+            acc = eval_model()
+            restore_head_linear_out(layer.cross_attn, head_idx, orig)
+            layer_results.append(acc)
+        ablation_results['decoder_cross'][str(layer_idx)] = layer_results
 
     # Save ablation results
     with open(output_dir / 'ablation_results.json', 'w') as f:
@@ -235,8 +382,13 @@ def evaluate_model(model, dataloader, device):
             # TODO: Generate predictions
             # TODO: Compare with targets
             # TODO: Count correct sequences
+            preds = model.generate(inputs, max_len=targets.size(1))
+            matches = (preds == targets)
+            seq_correct = matches.all(dim=1)
+            correct += seq_correct.sum().item()
+            total += targets.size(0)
 
-    return correct / total
+    return (correct / total) if total > 0 else 0.0
 
 
 def plot_head_importance(ablation_results, save_path):
@@ -252,19 +404,39 @@ def plot_head_importance(ablation_results, save_path):
 
     # TODO: Create bar plot showing accuracy drop when each head is removed
 
-    plt.figure(figsize=(12, 6))
+    fig = plt.figure(figsize=(12, 6))
 
     # TODO: Plot bars for each head
+    labels = []
+    drops = []
+    if 'encoder' in ablation_results:
+        for layer_idx, acc_list in ablation_results['encoder'].items():
+            for h, acc in enumerate(acc_list):
+                labels.append(f'Encoder L{layer_idx} H{h}')
+                drops.append(baseline - acc)
+    if 'decoder_self' in ablation_results:
+        for layer_idx, acc_list in ablation_results['decoder_self'].items():
+            for h, acc in enumerate(acc_list):
+                labels.append(f'Decoder Self L{layer_idx} H{h}')
+                drops.append(baseline - acc)
+    if 'decoder_cross' in ablation_results:
+        for layer_idx, acc_list in ablation_results['decoder_cross'].items():
+            for h, acc in enumerate(acc_list):
+                labels.append(f'Decoder Cross L{layer_idx} H{h}')
+                drops.append(baseline - acc)
+
+    x = np.arange(len(labels))
+    plt.bar(x, drops)
+    plt.xticks(x, labels, rotation=45, ha='right')
 
     plt.xlabel('Head')
     plt.ylabel('Accuracy Drop')
     plt.title('Head Importance (Accuracy Drop When Removed)')
-    plt.xticks(rotation=45)
     plt.tight_layout()
 
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.show()
+    plt.close(fig)
 
 
 def visualize_example_predictions(model, dataloader, device, output_dir, num_examples=5):
@@ -279,7 +451,7 @@ def visualize_example_predictions(model, dataloader, device, output_dir, num_exa
         num_examples: Number of examples to visualize
     """
     output_dir = Path(output_dir)
-    (output_dir / 'examples').mkdir(parents=True, exist_ok=True)
+    (output_dir / 'attention_patterns').mkdir(parents=True, exist_ok=True)
 
     model.eval()
 
@@ -311,7 +483,28 @@ def visualize_example_predictions(model, dataloader, device, output_dir, num_exa
             print(f"  Correct: {target_str == pred_str}")
 
             # TODO: Extract and visualize attention for this example
-            # Save attention heatmaps to output_dir / 'examples' / f'example_{batch_idx}.png'
+            # Capture decoder cross-attention for first decoder layer
+            dec_cross_attns = []
+            def hook(module, inp, out):
+                dec_cross_attns.append(out[1].detach().cpu())
+            handle = model.decoder_layers[0].cross_attn.register_forward_hook(hook)
+
+            # Run one teacher-forced forward to populate attention
+            decoder_input = target_seq.unsqueeze(0)[:, :-1]
+            tgt_mask = create_causal_mask(decoder_input.size(1), device=device)
+            _ = model(input_seq, decoder_input, tgt_mask=tgt_mask)
+            handle.remove()
+
+            if dec_cross_attns:
+                # Take first capture, first sample
+                attn = dec_cross_attns[0][0]  # [num_heads, out_len, in_len]
+                # Build token labels
+                in_tokens = [str(int(t)) for t in input_seq[0].cpu().numpy().tolist()]
+                out_tokens = [str(int(t)) for t in target_seq.cpu().numpy().tolist()[:-1]]  # aligned with decoder_input
+                save_path = output_dir / 'attention_patterns' / f'example_{batch_idx}.png'
+                visualize_attention_pattern(attn, in_tokens, out_tokens,
+                                            title=f'Example {batch_idx+1} Decoder Cross-Attention',
+                                            save_path=save_path)
 
 
 def main():
@@ -357,11 +550,13 @@ def main():
     head_stats = analyze_head_specialization(
         attention_data, output_dir / 'head_analysis'
     )
+    print(f"Computed head specialization stats for {len(head_stats)} heads (if any).")
 
     # Run ablation study
     ablation_results = ablation_study(
         model, test_loader, args.device, output_dir / 'head_analysis'
     )
+    print(f"Ablation study completed. Entries recorded: {len(ablation_results)}")
 
     # Visualize example predictions
     visualize_example_predictions(

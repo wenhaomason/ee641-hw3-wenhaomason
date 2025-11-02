@@ -2,10 +2,11 @@
 Attention mechanisms for sequence-to-sequence modeling.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 
 
 def scaled_dot_product_attention(Q, K, V, mask=None):
@@ -28,12 +29,17 @@ def scaled_dot_product_attention(Q, K, V, mask=None):
     d_k = Q.size(-1)
 
     # TODO: Compute attention scores
+    scores = torch.matmul(Q, K.transpose(-2, -1))
     # TODO: Scale scores
+    scores = scores / math.sqrt(d_k)
     # TODO: Apply mask if provided (use masked_fill to set masked positions to -inf)
+    if mask is not None:
+        scores = scores.masked_fill(mask == 0, float('-inf'))
     # TODO: Apply softmax
+    attention_weights = F.softmax(scores, dim=-1)
     # TODO: Apply attention to values
-
-    raise NotImplementedError
+    output = torch.matmul(attention_weights, V)
+    return output, attention_weights
 
 
 class MultiHeadAttention(nn.Module):
@@ -60,7 +66,12 @@ class MultiHeadAttention(nn.Module):
         self.d_k = d_model // num_heads
 
         # TODO: Initialize linear projections for Q, K, V
+        self.linear_q = nn.Linear(d_model, d_model)
+        self.linear_k = nn.Linear(d_model, d_model)
+        self.linear_v = nn.Linear(d_model, d_model)
+
         # TODO: Initialize output projection
+        self.linear_out = nn.Linear(d_model, d_model)
 
     def split_heads(self, x):
         """
@@ -75,8 +86,9 @@ class MultiHeadAttention(nn.Module):
         batch_size, seq_len, _ = x.size()
 
         # TODO: Reshape and transpose to split heads
-
-        raise NotImplementedError
+        x = x.view(batch_size, seq_len, self.num_heads, self.d_k)
+        x = x.transpose(1, 2)
+        return x
 
     def combine_heads(self, x):
         """
@@ -91,8 +103,9 @@ class MultiHeadAttention(nn.Module):
         batch_size, _, seq_len, d_k = x.size()
 
         # TODO: Transpose and reshape to combine heads
-
-        raise NotImplementedError
+        x = x.transpose(1, 2).contiguous()
+        x = x.view(batch_size, seq_len, self.d_model)
+        return x
 
     def forward(self, query, key, value, mask=None):
         """
@@ -108,15 +121,25 @@ class MultiHeadAttention(nn.Module):
             output: Attention output [batch, seq_len_q, d_model]
             attention_weights: Attention weights [batch, num_heads, seq_len_q, seq_len_k]
         """
-        batch_size = query.size(0)
+        batch_size = query.size(0)  # noqa: F841
 
         # TODO: Linear projections
+        Q = self.linear_q(query)
+        K = self.linear_k(key)
+        V = self.linear_v(value)
         # TODO: Split heads
+        Q = self.split_heads(Q)
+        K = self.split_heads(K)
+        V = self.split_heads(V)
         # TODO: Apply scaled dot-product attention
+        attn_output, attention_weights = scaled_dot_product_attention(Q, K, V, mask)
         # TODO: Combine heads
+        attn_output = self.combine_heads(attn_output)
         # TODO: Apply output projection
+        output = self.linear_out(attn_output)
+        
+        return output, attention_weights
 
-        raise NotImplementedError
 
 
 def create_causal_mask(seq_len, device=None):

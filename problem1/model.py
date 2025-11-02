@@ -2,11 +2,11 @@
 Sequence-to-sequence transformer model for addition task.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-
 from attention import MultiHeadAttention, create_causal_mask
 
 
@@ -22,13 +22,20 @@ class PositionalEncoding(nn.Module):
         super().__init__()
 
         # TODO: Create positional encoding matrix
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # Shape [1, max_len, d_model]
         # TODO: Register as buffer (not a parameter)
+        self.register_buffer("pe", pe)
 
     def forward(self, x):
         """Add positional encoding to input embeddings."""
         # TODO: Add positional encoding to x
-        raise NotImplementedError
-
+        x = x + self.pe[:, :x.size(1), :] # type: ignore
+        return x
 
 class FeedForward(nn.Module):
     """
@@ -41,6 +48,9 @@ class FeedForward(nn.Module):
         super().__init__()
 
         # TODO: Initialize two linear layers and dropout
+        self.linear1 = nn.Linear(d_model, d_ff)
+        self.linear2 = nn.Linear(d_ff, d_model)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         """
@@ -53,7 +63,11 @@ class FeedForward(nn.Module):
             Output tensor [batch, seq_len, d_model]
         """
         # TODO: Implement feed-forward with ReLU activation
-        raise NotImplementedError
+        x = self.linear1(x)
+        x = F.relu(x)
+        x = self.dropout(x)
+        x = self.linear2(x)
+        return x
 
 
 class EncoderLayer(nn.Module):
@@ -69,9 +83,15 @@ class EncoderLayer(nn.Module):
 
         # TODO: Initialize components
         # - self-attention
+        self.self_attn = MultiHeadAttention(d_model, num_heads)
         # - feed-forward
+        self.feed_forward = FeedForward(d_model, d_ff, dropout)
         # - layer normalizations
+        self.layer_norm1 = nn.LayerNorm(d_model)
+        self.layer_norm2 = nn.LayerNorm(d_model)
         # - dropout layers
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
 
     def forward(self, x, mask=None):
         """
@@ -85,11 +105,16 @@ class EncoderLayer(nn.Module):
             Output tensor [batch, seq_len, d_model]
         """
         # TODO: Self-attention with residual
+        attn_output, _ = self.self_attn(x, x, x, mask)
+        x = x + self.dropout1(attn_output)
+        x = self.layer_norm1(x)
         # TODO: Layer norm
+        ff_output = self.feed_forward(x)
         # TODO: Feed-forward with residual
+        x = x + self.dropout2(ff_output)
         # TODO: Layer norm
-
-        raise NotImplementedError
+        x = self.layer_norm2(x)
+        return x
 
 
 class DecoderLayer(nn.Module):
@@ -105,10 +130,19 @@ class DecoderLayer(nn.Module):
 
         # TODO: Initialize components
         # - masked self-attention
+        self.self_attn = MultiHeadAttention(d_model, num_heads)
         # - encoder-decoder cross-attention
+        self.cross_attn = MultiHeadAttention(d_model, num_heads)
         # - feed-forward
+        self.feed_forward = FeedForward(d_model, d_ff, dropout)
         # - layer normalizations
+        self.layer_norm1 = nn.LayerNorm(d_model)
+        self.layer_norm2 = nn.LayerNorm(d_model)
+        self.layer_norm3 = nn.LayerNorm(d_model)
         # - dropout layers
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.dropout3 = nn.Dropout(dropout)
 
     def forward(self, x, encoder_output, src_mask=None, tgt_mask=None):
         """
@@ -124,14 +158,24 @@ class DecoderLayer(nn.Module):
             Output tensor [batch, tgt_len, d_model]
         """
         # TODO: Masked self-attention with residual
+        attn_output, _ = self.self_attn(x, x, x, tgt_mask)
+        x = x + self.dropout1(attn_output)
+        
         # TODO: Layer norm
+        x = self.layer_norm1(x)
+        
         # TODO: Cross-attention with residual
+        cross_attn_output, _ = self.cross_attn(x, encoder_output, encoder_output, src_mask)
+        x = x + self.dropout2(cross_attn_output)
+        
         # TODO: Layer norm
+        x = self.layer_norm2(x)
         # TODO: Feed-forward with residual
+        ff_output = self.feed_forward(x)
+        x = x + self.dropout3(ff_output)
         # TODO: Layer norm
-
-        raise NotImplementedError
-
+        x = self.layer_norm3(x)
+        return x
 
 class Seq2SeqTransformer(nn.Module):
     """
@@ -162,7 +206,15 @@ class Seq2SeqTransformer(nn.Module):
         self.pos_encoding = PositionalEncoding(d_model, max_len)
 
         # TODO: Initialize encoder layers
+        self.encoder_layers = nn.ModuleList([
+            EncoderLayer(d_model, num_heads, d_ff, dropout)
+            for _ in range(num_encoder_layers)
+        ])
         # TODO: Initialize decoder layers
+        self.decoder_layers = nn.ModuleList([
+            DecoderLayer(d_model, num_heads, d_ff, dropout)
+            for _ in range(num_decoder_layers)  
+        ])
 
         # Output projection
         self.output_projection = nn.Linear(d_model, vocab_size)
@@ -196,8 +248,10 @@ class Seq2SeqTransformer(nn.Module):
         x = self.dropout(x)
 
         # TODO: Pass through encoder layers
+        for layer in self.encoder_layers:
+            x = layer(x, src_mask)
 
-        raise NotImplementedError
+        return x
 
     def decode(self, tgt, encoder_output, src_mask=None, tgt_mask=None):
         """
@@ -218,8 +272,10 @@ class Seq2SeqTransformer(nn.Module):
         x = self.dropout(x)
 
         # TODO: Pass through decoder layers
+        for layer in self.decoder_layers:
+            x = layer(x, encoder_output, src_mask, tgt_mask)
 
-        raise NotImplementedError
+        return x
 
     def forward(self, src, tgt, src_mask=None, tgt_mask=None):
         """
@@ -235,10 +291,12 @@ class Seq2SeqTransformer(nn.Module):
             Output logits [batch, tgt_len, vocab_size]
         """
         # TODO: Encode source
+        encoder_output = self.encode(src, src_mask)
         # TODO: Decode target
+        decoder_output = self.decode(tgt, encoder_output, src_mask, tgt_mask)
         # TODO: Project to vocabulary
-
-        raise NotImplementedError
+        logits = self.output_projection(decoder_output)
+        return logits
 
     def generate(self, src, max_len=20, start_token=0):
         """

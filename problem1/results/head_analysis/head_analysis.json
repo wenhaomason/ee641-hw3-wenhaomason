@@ -1,0 +1,26 @@
+{
+  "head_0": {
+    "avg_attention_to_operator": 0.3169298470020294,
+    "avg_attention_diagonal": 0.02833791822195053,
+    "avg_attention_carry_prev": 0.0723748579621315,
+    "avg_entropy": 0.6815404295921326
+  },
+  "head_1": {
+    "avg_attention_to_operator": 0.1760345846414566,
+    "avg_attention_diagonal": 0.16747239232063293,
+    "avg_attention_carry_prev": 0.08210325241088867,
+    "avg_entropy": 0.9590005874633789
+  },
+  "head_2": {
+    "avg_attention_to_operator": 0.2771875560283661,
+    "avg_attention_diagonal": 0.10757363587617874,
+    "avg_attention_carry_prev": 0.032600682228803635,
+    "avg_entropy": 0.4871455132961273
+  },
+  "head_3": {
+    "avg_attention_to_operator": 0.16961249709129333,
+    "avg_attention_diagonal": 0.3746228516101837,
+    "avg_attention_carry_prev": 0.1404181271791458,
+    "avg_entropy": 1.1536682844161987
+  }
+}

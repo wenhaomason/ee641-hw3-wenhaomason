@@ -2,18 +2,17 @@
 Training script for sequence-to-sequence addition model.
 """
 
+import argparse
+import json
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from pathlib import Path
-import json
-import argparse
-from tqdm import tqdm
-import time
-
-from model import Seq2SeqTransformer
-from dataset import create_dataloaders, get_vocab_size
 from attention import create_causal_mask
+from dataset import create_dataloaders, get_vocab_size
+from model import Seq2SeqTransformer
+from tqdm import tqdm
 
 
 def compute_accuracy(outputs, targets, pad_token=0):
@@ -29,10 +28,14 @@ def compute_accuracy(outputs, targets, pad_token=0):
         Accuracy (fraction of completely correct sequences)
     """
     # TODO: Get predicted tokens from logits
+    preds = outputs.argmax(dim=-1)
     # TODO: Create mask for non-padding positions
+    # For this task, targets are fixed-length (no padding), so use full mask
+    non_pad_mask = torch.ones_like(targets, dtype=torch.bool)
     # TODO: Check if entire sequence matches (excluding padding)
-
-    raise NotImplementedError
+    matches = (preds == targets) | (~non_pad_mask)
+    seq_correct = matches.all(dim=1)
+    return seq_correct.float().mean().item()
 
 
 def train_epoch(model, dataloader, criterion, optimizer, device):
@@ -63,6 +66,8 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         # TODO: Prepare decoder input and output for teacher forcing
         # Decoder input should be targets shifted right (exclude last token)
         # Decoder output should be targets shifted left (exclude first token)
+        decoder_input = targets[:, :-1]
+        decoder_output = targets[:, 1:]
 
         # TODO: Create causal mask for decoder (using shifted sequence length)
         # TODO: Forward pass
@@ -70,6 +75,14 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         # Hint: Flatten for cross entropy - need 2D tensors
         # TODO: Backward pass and optimization
         # TODO: Compute accuracy
+        tgt_mask = create_causal_mask(decoder_input.size(1), device=device)
+        optimizer.zero_grad()
+        outputs = model(inputs, decoder_input, tgt_mask=tgt_mask)
+        vocab_size = outputs.size(-1)
+        loss = criterion(outputs.reshape(-1, vocab_size), decoder_output.reshape(-1))
+        loss.backward()
+        optimizer.step()
+        acc = compute_accuracy(outputs, decoder_output)
 
         # Update progress bar
         progress.set_postfix({
@@ -111,6 +124,15 @@ def evaluate(model, dataloader, criterion, device):
             # TODO: Create causal mask (using shifted sequence length)
             # TODO: Forward pass
             # TODO: Compute loss and accuracy (flatten for cross entropy)
+            decoder_input = targets[:, :-1]
+            decoder_output = targets[:, 1:]
+            tgt_mask = create_causal_mask(decoder_input.size(1), device=device)
+            outputs = model(inputs, decoder_input, tgt_mask=tgt_mask)
+            vocab_size = outputs.size(-1)
+            loss = criterion(outputs.reshape(-1, vocab_size), decoder_output.reshape(-1))
+
+            # Compute accuracy under teacher forcing to match training setup
+            acc = compute_accuracy(outputs, decoder_output)
 
             total_loss += loss.item()
             total_acc += acc
@@ -165,6 +187,9 @@ def main():
     # TODO: Initialize optimizer (Adam recommended)
     # TODO: Initialize learning rate scheduler (ReduceLROnPlateau recommended)
     # TODO: Initialize loss function (use nn.CrossEntropyLoss)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
+    criterion = nn.CrossEntropyLoss()
 
     # Training loop
     best_val_acc = -1
@@ -192,6 +217,7 @@ def main():
         )
 
         # TODO: Step learning rate scheduler (pass val_loss)
+        scheduler.step(val_loss)
 
         # Log results
         print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2%}")
@@ -214,8 +240,8 @@ def main():
     print(f"\nTest Loss: {test_loss:.4f}, Test Acc: {test_acc:.2%}")
 
     # Save training history
-    training_history['test_loss'] = test_loss
-    training_history['test_acc'] = test_acc
+    training_history['test_loss'] = [test_loss]
+    training_history['test_acc'] = [test_acc]
     with open(output_dir / 'training_log.json', 'w') as f:
         json.dump(training_history, f, indent=2)
 
