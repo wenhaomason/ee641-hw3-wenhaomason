@@ -4,7 +4,6 @@ Positional encoding implementations for length extrapolation analysis.
 
 import torch
 import torch.nn as nn
-import math
 
 
 class SinusoidalPositionalEncoding(nn.Module):
@@ -31,8 +30,18 @@ class SinusoidalPositionalEncoding(nn.Module):
         # TODO: Create positional encoding matrix
         # Shape should be [max_len, d_model]
         # Use the sinusoidal formula for positions
+        positions = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2, dtype=torch.float32)
+            * (-torch.log(torch.tensor(10000.0)) / d_model)
+        )
+        pe = torch.zeros(max_len, d_model, dtype=torch.float32)
+        pe[:, 0::2] = torch.sin(positions * div_term)
+        pe[:, 1::2] = torch.cos(positions * div_term)
+        pe = pe.unsqueeze(0)
 
         # TODO: Register as buffer (not trainable parameter)
+        self.register_buffer("pe", pe)
 
     def forward(self, x):
         """
@@ -49,8 +58,28 @@ class SinusoidalPositionalEncoding(nn.Module):
         # TODO: Add positional encoding to input
         # For sequences longer than max_len, compute sinusoidal values on-the-fly
         # Use the same formula from __init__ to compute positions dynamically
+        assert isinstance(self.pe, torch.Tensor)
+        pe_buf: torch.Tensor = self.pe
+        max_len = int(pe_buf.shape[1])
+        if seq_len <= max_len:
+            pe = pe_buf[:, :seq_len, :]
+        else:
+            extra_len = int(seq_len - max_len)
+            start = int(max_len)
+            positions = torch.arange(start, start + extra_len, device=x.device, dtype=torch.float32).unsqueeze(1)
+            div_term = torch.exp(
+                torch.arange(0, self.d_model, 2, device=x.device, dtype=torch.float32)
+                * (-torch.log(torch.tensor(10000.0, device=x.device)) / self.d_model)
+            )
+            pe_extra = torch.zeros(extra_len, self.d_model, device=x.device, dtype=torch.float32)
+            pe_extra[:, 0::2] = torch.sin(positions * div_term)
+            pe_extra[:, 1::2] = torch.cos(positions * div_term)
+            pe_base = pe_buf.to(x.device).squeeze(0)
+            pe_cat = torch.cat((pe_base, pe_extra), dim=0)
+            pe = pe_cat.unsqueeze(0)
+        x = x + pe
 
-        raise NotImplementedError
+        return x
 
 
 class LearnedPositionalEncoding(nn.Module):
@@ -75,8 +104,11 @@ class LearnedPositionalEncoding(nn.Module):
 
         # TODO: Create learnable position embeddings
         # Use nn.Embedding with max_len positions
+        self.position_embeddings = nn.Embedding(max_len, d_model)
 
         # TODO: Initialize embeddings (e.g., normal distribution)
+        self.position_embeddings.weight.data.normal_(0, 0.02)
+
 
     def forward(self, x):
         """
@@ -92,11 +124,15 @@ class LearnedPositionalEncoding(nn.Module):
 
         # TODO: Get position indices using torch.arange(seq_len, device=x.device)
         # For extrapolation: use torch.clamp(positions, max=self.max_len-1)
+        positions = torch.arange(seq_len, device=x.device)
+        positions = torch.clamp(positions, max=self.max_len-1)
 
         # TODO: Look up position embeddings using self.position_embeddings
+        position_embeddings = self.position_embeddings(positions)
         # TODO: Add to input and return
+        x = x + position_embeddings
 
-        raise NotImplementedError
+        return x
 
 
 class NoPositionalEncoding(nn.Module):
@@ -129,9 +165,7 @@ class NoPositionalEncoding(nn.Module):
             x unchanged
         """
         # TODO: Return input without modification
-
-        raise NotImplementedError
-
+        return x
 
 def get_positional_encoding(encoding_type, d_model, max_len=5000):
     """

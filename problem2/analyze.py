@@ -2,19 +2,18 @@
 Extrapolation analysis for different positional encoding strategies.
 """
 
-import torch
-import torch.nn as nn
-import numpy as np
+import argparse
+import json
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import seaborn as sns
-from pathlib import Path
-import json
-import argparse
-from tqdm import tqdm
-
+import torch
+from dataset import create_extrapolation_loader
+from generate_data import generate_dataset
 from model import create_model
-from dataset import create_extrapolation_loader, create_dataloaders
 from positional_encoding import visualize_positional_encoding
+from tqdm import tqdm
 
 
 def evaluate_extrapolation(model, data_dir, test_lengths, device, batch_size=32):
@@ -38,6 +37,21 @@ def evaluate_extrapolation(model, data_dir, test_lengths, device, batch_size=32)
         print(f"Testing on length {length}...")
 
         # Load data for this length
+        # Ensure extrapolation file exists; if missing, generate it on-the-fly
+        extrap_dir = Path(data_dir) / 'extrapolation'
+        data_path = extrap_dir / f'test_len_{length}.json'
+        if not data_path.exists():
+            extrap_dir.mkdir(parents=True, exist_ok=True)
+            dataset = generate_dataset(
+                num_samples=500,
+                min_len=length,
+                max_len=length,
+                sorted_prob=0.5,
+                seed=641 + length
+            )
+            with open(data_path, 'w') as f:
+                json.dump(dataset, f, indent=2)
+
         dataloader = create_extrapolation_loader(
             data_dir, length, batch_size
         )
@@ -52,7 +66,11 @@ def evaluate_extrapolation(model, data_dir, test_lengths, device, batch_size=32)
                 masks = batch['mask'].to(device)
 
                 # TODO: Get predictions
+                logits = model(sequences, masks)
+                predictions = logits.argmax(dim=1)
                 # TODO: Count correct predictions
+                correct += (predictions == labels).sum().item()
+                total += labels.size(0)
 
         accuracy = correct / total
         results[length] = accuracy
@@ -107,7 +125,7 @@ def plot_extrapolation_curves(all_results, save_path):
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
-    plt.show()
+    plt.close()
     print(f"Saved extrapolation curves to {save_path}")
 
 
@@ -132,6 +150,8 @@ def visualize_learned_positions(model_path, output_dir, max_positions=128):
 
     # TODO: Extract embedding weights
     # For learned encoding, this should be from pos_encoding.position_embeddings
+    assert hasattr(pos_encoding, 'position_embeddings')
+    weights = pos_encoding.position_embeddings.weight.detach().cpu().numpy()
 
     # Visualize embeddings as heatmap
     plt.figure(figsize=(12, 8))
@@ -139,11 +159,21 @@ def visualize_learned_positions(model_path, output_dir, max_positions=128):
     # TODO: Create heatmap of position embeddings
     # Show first max_positions positions and all dimensions
     # Include xlabel, ylabel, title, and colorbar
+    sns.heatmap(
+        weights[:max_positions, :],
+        cmap='RdBu_r',
+        cbar=True,
+        xticklabels=False,
+        yticklabels=True
+    )
+    plt.xlabel('Embedding Dimension')
+    plt.ylabel('Position Index')
+    plt.title('Learned Positional Embeddings')
 
     save_path = output_dir / 'learned_position_embeddings.png'
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
-    plt.show()
+    plt.close()
     print(f"Saved position embeddings visualization to {save_path}")
 
 
@@ -160,9 +190,9 @@ def compare_position_encodings(output_dir, d_model=128, max_len=128):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     from positional_encoding import (
-        SinusoidalPositionalEncoding,
         LearnedPositionalEncoding,
-        NoPositionalEncoding
+        NoPositionalEncoding,
+        SinusoidalPositionalEncoding,
     )
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -202,7 +232,7 @@ def compare_position_encodings(output_dir, d_model=128, max_len=128):
 
     save_path = output_dir / 'encoding_comparison.png'
     plt.savefig(save_path, dpi=150)
-    plt.show()
+    plt.close()
     print(f"Saved encoding comparison to {save_path}")
 
 

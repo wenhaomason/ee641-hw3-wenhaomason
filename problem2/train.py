@@ -2,17 +2,17 @@
 Training script for sorting classifier with different positional encodings.
 """
 
+import argparse
+import json
+from pathlib import Path
+
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from pathlib import Path
-import json
-import argparse
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-
-from model import create_model
 from dataset import create_dataloaders
+from model import create_model
+from tqdm import tqdm
 
 
 def train_epoch(model, dataloader, criterion, optimizer, device):
@@ -42,9 +42,14 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         masks = batch['mask'].to(device)
 
         # TODO: Forward pass
+        logits = model(sequences, masks)
         # TODO: Compute loss
+        loss = criterion(logits, labels)
         # TODO: Backward pass
+        optimizer.zero_grad()
+        loss.backward()
         # TODO: Update weights
+        optimizer.step()
 
         # Compute accuracy
         predictions = logits.argmax(dim=1)
@@ -87,7 +92,9 @@ def evaluate(model, dataloader, criterion, device):
             masks = batch['mask'].to(device)
 
             # TODO: Forward pass
+            logits = model(sequences, masks)
             # TODO: Compute loss
+            loss = criterion(logits, labels)
 
             # Compute accuracy
             predictions = logits.argmax(dim=1)
@@ -183,8 +190,11 @@ def main():
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # TODO: Initialize optimizer (Adam recommended)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
     # TODO: Initialize loss function (use nn.CrossEntropyLoss)
+    criterion = nn.CrossEntropyLoss()
     # TODO: Initialize learning rate scheduler (ReduceLROnPlateau recommended)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
 
     # Training history
     history = {
@@ -211,6 +221,7 @@ def main():
         )
 
         # TODO: Step learning rate scheduler (pass val_loss)
+        scheduler.step(val_loss)
 
         # Log results
         print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2%}")
