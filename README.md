@@ -1,5 +1,8 @@
 # EE 641 - Homework 3: Attention Mechanisms and Transformers
 
+- Full Name: Wenhao Shi
+- USC email: wenhaos@usc.edu
+
 Starter code for implementing multi-head attention and analyzing positional encoding strategies.
 
 ## Structure
@@ -8,6 +11,7 @@ Starter code for implementing multi-head attention and analyzing positional enco
 - **`problem2/`** - Positional encoding extrapolation experiments
 
 See individual problem READMEs for detailed instructions:
+
 - [Problem 1 README](problem1/README.md)
 - [Problem 2 README](problem2/README.md)
 
@@ -20,6 +24,7 @@ pip install torch>=2.0.0 numpy>=1.24.0 matplotlib>=3.7.0 tqdm>=4.65.0
 ## Quick Start
 
 ### Problem 1: Multi-Head Attention
+
 ```bash
 cd problem1
 python generate_data.py --seed 641
@@ -28,6 +33,7 @@ python analyze.py
 ```
 
 ### Problem 2: Positional Encoding
+
 ```bash
 cd problem2
 python generate_data.py --seed 641
